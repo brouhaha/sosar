@@ -1,7 +1,7 @@
-# sosutil - utility to manipulate SOS and ProDOS disk images
+# sosar - utility to manipulate SOS and ProDOS disk images
 
 Hosted at the
-[sosutil Github repository](https://github.com/brouhaha/sosutil/).
+[sosar Github repository](https://github.com/brouhaha/sosar/).
 
 ## Introduction
 
@@ -14,6 +14,7 @@ In 1983, Apple introduced the ProDOS operating system for the Apple II
 family, intended to replace Apple DOS. ProDOS used the same filesystem
 as SOS.
 
-sosutil is intended to provide a command line interface to manipulate
-SOS and ProDOS disk image files. As of this writing, sosutil is only
-capable of printing the directory of such a disk image file.
+sosar (pronounced like "saucer") is intended to provide a command line
+interface to manipulate SOS and ProDOS disk image files. As of this
+writing, sosar is only capable of printing the directory of such a
+disk image file.
