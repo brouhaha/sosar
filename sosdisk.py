@@ -1,3 +1,4 @@
+import datetime
 import string
 import struct
 import sys
@@ -46,11 +47,30 @@ interleave_tables = { 'dos':    dos_to_phys_sect,
 
 sos_valid_fn_chars = set(string.ascii_uppercase + string.digits + '.')
 
-def bytes_to_sos_filename(b):
+def bytes_to_sos_filename(l, b):
+    assert len(b) == 15
+    assert 1 <= l <= 15
     s = str(b, 'ascii')
-    assert all(c in sos_valid_fn_chars for c in s)
+    assert all(c in sos_valid_fn_chars for c in s[:l])
+    assert all(c == 0 for c in b[l:])
     return s.lower()
 
+def u32_to_sos_timestamp(b):
+    if b == 0:
+        return None
+    ymd = b & 0xffff
+    hm = b >> 16
+    year = 1900 + (ymd >> 9)
+    month = (ymd >> 5) & 0xf
+    day = ymd & 0x1f
+    hour = hm >> 8
+    minute = hm & 0xff
+    assert 1 <= month <= 12
+    assert 1 <= day <= 31
+    assert 0 <= hour <= 23
+    assert 0 <= minute <= 59
+    return datetime.datetime(year, month, day, hour, minute)
+    
 
 class SOSDirectoryEntry:
     def __init__(self, disk):
@@ -64,15 +84,17 @@ class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
         #print('volume directory header')
-        (self.storage, self.filename, self.reserved, self.creation, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
-        self.name_length = self.storage & 0xf
+        (self.storage, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
+        name_length = self.storage & 0xf
         self.storage >>= 4
+        self.name = bytes_to_sos_filename(name_length, name_b)
         assert self.storage == 0xf
         assert self.version == 0
         assert self.min_version == 0
         assert self.entry_length == 0x27
         assert self.entries_per_block == 0x0d
         assert self.total_blocks == disk.block_count
+        self.creation = u32_to_sos_timestamp(creation_b)
 
 class SOSSubdirectoryHeader(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
@@ -82,19 +104,20 @@ class SOSSubdirectoryHeader(SOSDirectoryEntry):
 class SOSFileEntry(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
-        (self.storage, self.filename, self.file_type, self.key_pointer, self.blocks_used, self.eof, self.creation, self.version, self.min_version, self.access, self.aux_type, self.last_mod, self.header_pointer) = struct.unpack('<B15sBHH3sLBBBHLH', entry_data)
+        (self.storage, name_b, self.file_type, self.key_pointer, self.blocks_used, self.eof, creation_b, self.version, self.min_version, self.access, self.aux_type, self.last_mod, self.header_pointer) = struct.unpack('<B15sBHH3sLBBBHLH', entry_data)
         name_length = self.storage & 0xf
         self.storage >>= 4
         if self.storage == 0:
             return
-        self.name = bytes_to_sos_filename(entry_data[1:1+name_length])
+        self.name = bytes_to_sos_filename(name_length, name_b)
+        self.creation = u32_to_sos_timestamp(creation_b)
         if (self.storage == 0xd):
             self.subdir = SOSDirectory(disk, self.key_pointer)
 
     def print(self, prefix, file):
         if self.storage == 0:
             return
-        print('%s/%s, storage type %x' % (prefix, self.name, self.storage), file = file)
+        print('%s/%s, storage type %x, %s' % (prefix, self.name, self.storage, self.creation), file = file)
         if (self.storage == 0xd):
             self.subdir.print(prefix + '/' + self.name, file)
         
