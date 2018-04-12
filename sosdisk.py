@@ -1,3 +1,4 @@
+import string
 import struct
 import sys
 
@@ -43,6 +44,14 @@ interleave_tables = { 'dos':    dos_to_phys_sect,
                       'sos':    half_block_to_phys_sect }
 
 
+sos_valid_fn_chars = set(string.ascii_uppercase + string.digits + '.')
+
+def bytes_to_sos_filename(b):
+    s = str(b, 'ascii')
+    assert all(c in sos_valid_fn_chars for c in s)
+    return s.lower()
+
+
 class SOSDirectoryEntry:
     def __init__(self, disk):
         self.disk = disk
@@ -78,7 +87,7 @@ class SOSFileEntry(SOSDirectoryEntry):
         self.storage >>= 4
         if self.storage == 0:
             return
-        self.name = str(entry_data[1:1+name_length], 'ascii')
+        self.name = bytes_to_sos_filename(entry_data[1:1+name_length])
         if (self.storage == 0xd):
             self.subdir = SOSDirectory(disk, self.key_pointer)
 
