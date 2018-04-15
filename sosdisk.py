@@ -1,4 +1,5 @@
 import datetime
+from enum import Enum, IntEnum, IntFlag
 import string
 import struct
 import sys
@@ -14,6 +15,8 @@ def compose_dict(d1, d2):
 
 
 def reinterleave(src_image, src_interleave, dest_interleave):
+    if src_interleave == dest_interleave:
+        return src_image  # not a copy!
     map = compose_dict(src_interleave, invert_dict(dest_interleave))
     dest_image = bytearray(len(src_image))
     for t in range(35):
@@ -45,6 +48,87 @@ interleave_tables = { 'dos':    dos_to_phys_sect,
                       'sos':    half_block_to_phys_sect }
 
 
+class StorageType(IntEnum):
+    unused_entry            = 0x00
+    seedling                = 0x01  # no indirect blocks
+    sapling                 = 0x02  # one indirect block
+    tree                    = 0x03  # two levels of indirect blocks
+    a2_pascal_area          = 0x04  # Apple II Pascal area
+    subdirectory            = 0x0d
+    subdirectory_header     = 0x0e
+    volume_directory_header = 0x0f
+    
+
+
+class FileType(Enum):
+    unknown                 = 0x00, 'UNK'
+    bad_blocks              = 0x01, 'BAD'
+    code                    = 0x02, 'PCD'  # SOS only
+    pascal_text             = 0x03, 'PTX'  # SOS only
+    text                    = 0x04, 'TXT'  # normal ASCII text file
+    pascal_data             = 0x05, 'PDA'  # SOS only
+    binary                  = 0x06, 'BIN'
+    font                    = 0x07, 'FNT'  # SOS only
+    screen_image            = 0x08, 'FOT'
+    business_basic_program  = 0x09, 'BA3'  # SOS only
+    business_basic_data     = 0x0a, 'DA3'  # SOS only
+    word_processor          = 0x0b, 'WPF'  # SOS only
+    sos_system              = 0x0c, 'SOS'  # SOS only
+    # 0x0d..0x0e reserved for SOS
+    subdirectory            = 0x0f, 'DIR'
+    rps_data                = 0x10, 'RPD'  # SOS only
+    rps_index               = 0x11, 'RPI'  # SOS only
+    applefile_discard       = 0x12, 'AFD'  # SOS only
+    applefile_model         = 0x13, 'AFM'  # SOS only
+    applefile_report_format = 0x14, 'AFR'  # SOS only
+    screen_library          = 0x15, 'SCL'  # SOS only
+    # 0x16..0x18 reserved for SOS
+    appleworks_data_base    = 0x19, 'ADB'
+    appleworks_word_proc    = 0x1a, 'AWP'
+    appleworks_spreadsheet  = 0x1b, 'ASP'
+    # 0xe0..0xff are ProDOS only
+    edasm_816_reolcatable   = 0xee, 'R16'
+    pascal_area             = 0xef, 'PAR'
+    prodos_ci_added_command = 0xf0, 'CMD'
+    # 0xf1..0xf8 are ProDOS user-defined file types 1-8
+    user_defined_1          = 0xf1, 'OVL'
+    user_defined_2          = 0xf2, 'UD2'
+    user_defined_3          = 0xf3, 'UD3'
+    user_defined_4          = 0xf4, 'UD4'
+    user_defined_5          = 0xf5, 'BAT'
+    user_defined_6          = 0xf6, 'UD6'
+    user_defined_7          = 0xf7, 'UD7'
+    user_defined_8          = 0xf8, 'PRG'
+    prodos_16_system        = 0xf9, 'P16'
+    integer_basic_program   = 0xfa, 'INT'
+    integer_basic_variables = 0xfb, 'IVR'
+    applesoft_program       = 0xfc, 'BAS'
+    applesoft_variables     = 0xfd, 'VAR'
+    relocatable_code        = 0xfe, 'REL'  # EDASM
+    prodos_system           = 0xff, 'SYS'
+
+    def __new__(cls, int_value, abbrev):
+        obj = object.__new__(cls)
+        obj._value_ = int_value
+        obj.abbrev = abbrev
+        return obj
+
+    def __int__(self):
+        return self.value
+
+
+class FileAttributes(IntFlag):
+    destroy_enable = 0x80  # "D"
+    rename_enable  = 0x40  # "RN"
+    backup_needed  = 0x20  # "B"
+    # bits 4 through 2 are reserved
+    write_enable   = 0x02  # "W"
+    read_enable    = 0x01  # "R"
+
+    # synthesized attributes - not stored on disk
+    sparse         = 0x0100
+
+
 sos_valid_fn_chars = set(string.ascii_uppercase + string.digits + '.')
 
 def bytes_to_sos_filename(l, b):
@@ -72,23 +156,86 @@ def u32_to_sos_timestamp(b):
     return datetime.datetime(year, month, day, hour, minute)
     
 
+class SOSStorage:
+    @classmethod
+    def create(cls, disk, storage_type, key_pointer):
+        if storage_type == StorageType.seedling:
+            return SOSSeedling(disk, key_pointer)
+        elif storage_type == StorageType.sapling:
+            return SOSSapling(disk, key_pointer)
+        elif storage_type == StorageType.tree:
+            return SOSTree(disk, key_pointer)
+
+    def __init__(self, disk, key_pointer):
+        self.disk = disk
+        self.key_pointer = key_pointer
+        self.index = { }
+        self.index_blocks = 0
+        self.data_blocks = 0
+        self.last_block_index = 0
+
+    def is_sparse(self):
+        return self.data_blocks != (self.last_block_index + 1)
+
+
+class SOSSeedling(SOSStorage):
+    def __init__(self, disk, key_pointer):
+        super().__init__(disk, key_pointer)
+        self.disk.mark_used(key_pointer)
+        self.index[0] = key_pointer
+        self.data_blocks += 1
+
+class SOSSapling(SOSStorage):
+    def __init__(self, disk, key_pointer):
+        super().__init__(disk, key_pointer)
+        index_data = self.disk.get_blocks(key_pointer)
+        self.index_blocks += 1
+        for j in range(256):
+            b = index_data[j] + (index_data[j + 256] << 8)
+            if b != 0:
+                self.index[j] = b
+                self.disk.mark_used(b)
+                self.data_blocks += 1
+                self.last_block_index = j
+
+class SOSTree(SOSStorage):
+    def __init__(self, disk, key_pointer):
+        super().__init__(disk, key_pointer)
+        top_index_data = self.disk.get_blocks(key_pointer)
+        self.index_blocks += 1
+        for i in range(256):
+            tb = top_index_data[i] + (top_index_data[i + 256] << 8)
+            if tb != 0:
+                index_data = self.disk.get_blocks(b)
+                self.index_blocks += 1
+                for j in range(256):
+                    b = index_data[j] + (index_data[j + 256] << 8)
+                    if b != 0:
+                        self.index[j * 256 + i] = b
+                        self.disk.mark_used(b)
+                        self.data_blocks += 1
+                        self.last_block_index = j
+
 class SOSDirectoryEntry:
     def __init__(self, disk):
         self.disk = disk
 
-    def print(self, prefix, file):
+    def print(self,
+              prefix,
+              recursive = False,
+              long = False,
+              file = sys.stdout):
         pass
 
 
 class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
-        #print('volume directory header')
-        (self.storage, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
-        name_length = self.storage & 0xf
-        self.storage >>= 4
+        (storage_nl, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
+        name_length = storage_nl & 0xf
+        self.storage_type = StorageType(storage_nl >> 4)
         self.name = bytes_to_sos_filename(name_length, name_b)
-        assert self.storage == 0xf
+        assert self.storage_type == StorageType.volume_directory_header
         assert self.version == 0
         assert self.min_version == 0
         assert self.entry_length == 0x27
@@ -99,27 +246,67 @@ class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
 class SOSSubdirectoryHeader(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
-        #print('subdirectory header')
+        (storage_nl, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
+        name_length = storage_nl & 0xf
+        self.storage_type = StorageType(storage_nl >> 4)
+        self.name = bytes_to_sos_filename(name_length, name_b)
+        assert self.storage_type == StorageType.subdirectory_header
+        assert self.version == 0
+        assert self.min_version == 0
+        assert self.entry_length == 0x27
+        assert self.entries_per_block == 0x0d
+        self.creation = u32_to_sos_timestamp(creation_b)
 
 class SOSFileEntry(SOSDirectoryEntry):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
-        (self.storage, name_b, self.file_type, self.key_pointer, self.blocks_used, self.eof, creation_b, self.version, self.min_version, self.access, self.aux_type, self.last_mod, self.header_pointer) = struct.unpack('<B15sBHH3sLBBBHLH', entry_data)
-        name_length = self.storage & 0xf
-        self.storage >>= 4
-        if self.storage == 0:
+        (storage_nl, name_b, self.file_type, self.key_pointer, self.blocks_used, eof, creation_b, self.version, self.min_version, self.access, self.aux_type, self.last_mod, self.header_pointer) = struct.unpack('<B15sBHH3sLBBBHLH', entry_data)
+        name_length = storage_nl & 0xf
+        self.storage_type = StorageType(storage_nl >> 4)
+        if self.storage_type == StorageType.unused_entry:
             return
+        self.eof = eof [2] << 16 | eof [1] << 8 | eof[0]
         self.name = bytes_to_sos_filename(name_length, name_b)
         self.creation = u32_to_sos_timestamp(creation_b)
-        if (self.storage == 0xd):
+        if self.storage_type == StorageType.subdirectory:
+            assert self.file_type == int(FileType.subdirectory)
             self.subdir = SOSDirectory(disk, self.key_pointer)
+        else:
+            assert self.storage_type in set([StorageType.seedling, StorageType.sapling, StorageType.tree])
+            assert self.file_type != int(FileType.subdirectory)
+            self.storage = SOSStorage.create(self.disk, self.storage_type, self.key_pointer)
 
-    def print(self, prefix, file):
-        if self.storage == 0:
+
+    def print(self,
+              prefix,
+              recursive = False,
+              long = False,
+              file = sys.stdout):
+        if self.storage_type == StorageType.unused_entry:
             return
-        print('%s/%s, storage type %x, %s' % (prefix, self.name, self.storage, self.creation), file = file)
-        if (self.storage == 0xd):
-            self.subdir.print(prefix + '/' + self.name, file)
+        if long:
+            attrchar = 'rw234bnds'
+            attr = self.access
+            attrs = ''
+            if self.storage_type != StorageType.subdirectory and self.storage.is_sparse():
+                self.access |= FileAttributes.sparse
+            for b in range(8, -1, -1):
+                if self.access & (1 << b):
+                    attrs += attrchar[b]
+                else:
+                    attrs += '.'
+            try:
+                ft = FileType(self.file_type)
+                fts = ft.abbrev
+            except ValueError as e:
+                fts = '$%02x' % self.file_type
+            print('  %s  %s  %s  %6d' % (self.creation, fts, attrs, self.eof), end = '', file = file)
+        print('  %s' % (prefix + self.name), file = file)
+        if recursive and self.storage_type == StorageType.subdirectory:
+            self.subdir.print(prefix + self.name + '/',
+                              recursive = recursive,
+                              long = long,
+                              file = file)
         
 
 class SOSDirectoryBlock:
@@ -144,36 +331,84 @@ class SOSDirectoryBlock:
 
 
 class SOSDirectory:
-    def __init__(self, disk, first_block):
+    def __init__(self, disk, first_block = 0, new = False, block_count = 1):
         self.disk = disk
-        self.directory_blocks = [SOSDirectoryBlock(disk, first_block, first_dir_block = True)]
+        self.growable = first_block != 2
+        if new:
+            self.__create_new()
+        else:
+            self.__read_from_image(first_block)
+
+    def __read_from_image(self, first_block):
+        self.directory_blocks = [SOSDirectoryBlock(self.disk, first_block, first_dir_block = True)]
         while self.directory_blocks[-1].next_block != 0:
-            self.directory_blocks.append(SOSDirectoryBlock(disk, self.directory_blocks[-1].next_block))
+            self.directory_blocks.append(SOSDirectoryBlock(self.disk, self.directory_blocks[-1].next_block))
         self.header = self.directory_blocks[0].entries[0]
 
-    def print(self, prefix, file):
+    def __create_new(self, first_block, block_count):
+        pass
+
+    def print(self, prefix,
+              recursive = False,
+              long = False,
+              file = sys.stdout):
         for db in self.directory_blocks:
             for entry in db.entries:
-                entry.print(prefix, file)
+                entry.print(prefix,
+                            recursive = recursive,
+                            long = long,
+                            file = file)
+        # if recursive:
+        #     for db in self.directory_blocks:
+        #         for entry in db.entries:
+        #             if hasattr(entry, 'subdir'):
+        #                 entry.subdir.print('',
+        #                                    recursive = recursive,
+        #                                    file = file)
 
 
 class SOSDisk:
-    def __init__(self, f, fmt):
-        self.data = f.read()
-        if len(self.data) % 512:
-            print('Images must contain an integral number of 512-byte blocks', file = sys.stderr)
+    def __init__(self, f,
+                 fmt = 'po',
+                 new = False,
+                 size = None):
+        self.image_file = f
+        self.image_file_fmt = fmt
+        self.block_size = 512
+        if new:
+            self.__create_new(size)
+        else:
+            self.__read_image_file()
+
+    def __read_image_file(self):
+        self.data = self.image_file.read()
+        if len(self.data) % self.block_size:
+            print('Images must contain an integral number of %d-byte blocks' % self.block_size, file = sys.stderr)
             sys.exit(2)            
-        self.block_count = len(self.data) // 512
+        self.dirty = False
+        self.block_count = len(self.data) // self.block_size
         self.used = [False] * self.block_count
-        if (fmt != 'po'):
-            if len(self.data) != (35 * 16 * 256):
+        if self.image_file_fmt != 'po':
+            if len(self.data) != (35 * 8 * self.block_size):
                 print('Images other than 16-sector floppy must be in SOS/ProDOS sector order', file = sys.stderr)
                 sys.exit(2)
-            self.data = reinterleave(self.data, interleave_tables[fmt], interleave_tables['po'])
+            self.data = reinterleave(self.data, interleave_tables[self.image_file_fmt], interleave_tables['po'])
         self.mark_used(0, 2)  # boot blocks
-        self.volume_directory = SOSDirectory(self, 2)
-        bitmap_block_count = (self.volume_directory.header.total_blocks + 1) // (512 * 8)
+        self.volume_directory = SOSDirectory(self, 2, new = False)
+        bitmap_block_count = (self.volume_directory.header.total_blocks + 1) // (self.block_size * 8)
         self.mark_used(self.volume_directory.header.bitmap_pointer, bitmap_block_count)
+
+    def __create_new(size):
+        self.data = bytearray(size * self.block_size)
+        self.volume_directory = SOSDirectory(self, 2, new = True)
+
+
+    def close(self):
+        if self.dirty:
+            self.image_file.seek(0)
+            self.image_file.write(reinterleave(self.data, interleave_tables['po'], interleave_tables[self.image_file_fmt]))
+        self.data = None
+        self.image_file.close()
 
     def mark_used(self, first_block, count = 1):
         for block in range(first_block, first_block + count):
@@ -187,8 +422,16 @@ class SOSDisk:
         length = count * 512
         return self.data[offset:offset+length]
 
-    def print_directory(self, file=sys.stdout):
-        self.volume_directory.print(prefix = '', file = file)
+    def print_directory(self,
+                        recursive = False,
+                        long = False,
+                        file = sys.stdout):
+        print('volume /%s:' % self.volume_directory.header.name)
+        self.volume_directory.print('',
+                                    #prefix = '/' + self.volume_directory.header.name,
+                                    recursive = recursive,
+                                    long = long,
+                                    file = file)
 
 
 # blocks 0-1       loader
