@@ -238,8 +238,8 @@ class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
         assert self.storage_type == StorageType.volume_directory_header
         assert self.version == 0
         assert self.min_version == 0
-        assert self.entry_length == 0x27
-        assert self.entries_per_block == 0x0d
+        assert self.entry_length == 39       # XXX compare to SOSDirectory entry_length instead
+        assert self.entries_per_block == 13  # XXX compare to SOSDirectory entries_per_block instead
         assert self.total_blocks == disk.block_count
         self.creation = u32_to_sos_timestamp(creation_b)
 
@@ -310,43 +310,83 @@ class SOSFileEntry(SOSDirectoryEntry):
         
 
 class SOSDirectoryBlock:
-    def __init__(self, disk, block_num, first_dir_block = False):
+    def __init__(self,
+                 disk,
+                 directory,               # the directory containing this block
+                 block_num,
+                 first_dir_block = False,
+                 new = False,
+                 directory_name = None,   # if new
+                 prev_block = None):      # if new
         self.disk = disk
-        data = disk.get_blocks(block_num)
+        self.directory = directory
+        self.entries = []
+        self.entry_count = (self.disk.block_size - 4) // self.directory.entry_length
+        if new:
+            self.__create_new(block_num, first_dir_block)
+        else:
+            self.__read_from_image(block_num, first_dir_block)
+
+    def __read_from_image(self, block_num, first_dir_block = False):
+        data = self.disk.get_blocks(block_num)
         self.prev_block, self.next_block = struct.unpack('<HH', data[0:4])
         #print('prev: %d, next: %d' % (self.prev_block, self.next_block))
-        self.entries = []
-        entry_length = 39
-        entry_count = 13
-        for i in range(entry_count):
-            offset = 4 + entry_length * i
-            entry_data = data[offset: offset+entry_length]
+        for i in range(self.entry_count):
+            offset = 4 + self.directory.entry_length * i
+            entry_data = memoryview(data[offset: offset+self.directory.entry_length])
             if first_dir_block and i == 0:
                 if block_num == 2:
-                    self.entries.append(SOSVolumeDirectoryHeader(disk, entry_data))
+                    self.entries.append(SOSVolumeDirectoryHeader(self.disk, entry_data))
                 else:
-                    self.entries.append(SOSSubdirectoryHeader(disk, entry_data))
+                    self.entries.append(SOSSubdirectoryHeader(self.disk, entry_data))
             else:
-                self.entries.append(SOSFileEntry(disk, entry_data))
+                self.entries.append(SOSFileEntry(self.disk, entry_data))
+
+    def __create_new(self, block_num, first_dir_block = False):
+        self.prev_block = prev_block,
+        self.next_block = 0  # will be updated later if needed
+        data = struct.pack('<HH', self.prev_block, self.next_block) + bytearray(disk.block_size - 4)
+        if block_num == 2:
+            self.entries.append(SOSVolumeDirectoryHeader(disk, new = True, directory_name = directory_name))
+        else:
+            self.entries.append(SOSSubdirectoryHeader(disk, new = True, directory_name = directory_name))
 
 
 class SOSDirectory:
-    def __init__(self, disk, first_block = 0, new = False, block_count = 1):
+    def __init__(self,
+                 disk,
+                 first_block = None,
+                 new = False,
+                 block_count = 1,         # if new
+                 directory_name = None):  # if new
         self.disk = disk
         self.growable = first_block != 2
+        self.entry_length = 39
         if new:
-            self.__create_new()
+            self.__create_new(first_block, block_count)
         else:
+            # block_count not used
             self.__read_from_image(first_block)
 
     def __read_from_image(self, first_block):
-        self.directory_blocks = [SOSDirectoryBlock(self.disk, first_block, first_dir_block = True)]
+        self.directory_blocks = [SOSDirectoryBlock(self.disk,
+                                                   self,
+                                                   first_block,
+                                                   first_dir_block = True)]
         while self.directory_blocks[-1].next_block != 0:
-            self.directory_blocks.append(SOSDirectoryBlock(self.disk, self.directory_blocks[-1].next_block))
+            self.directory_blocks.append(SOSDirectoryBlock(self.disk,
+                                                           self,
+                                                           self.directory_blocks[-1].next_block))
         self.header = self.directory_blocks[0].entries[0]
 
-    def __create_new(self, first_block, block_count):
-        pass
+    def __create_new(self, first_block = None, block_count = 1):
+        prev_block_num = 0
+        for i in range(block_count):
+            if first_block is None:
+                block_num = disk.alloc_block()
+            else:
+                block_num = first_block + i
+            
 
     def print(self, prefix,
               recursive = False,
@@ -371,12 +411,13 @@ class SOSDisk:
     def __init__(self, f,
                  fmt = 'po',
                  new = False,
-                 size = None):
+                 volume_block_count = 280,           # only for creating new
+                 volume_directory_block_count = 4):  # only for creating new 
         self.image_file = f
         self.image_file_fmt = fmt
         self.block_size = 512
         if new:
-            self.__create_new(size)
+            self.__create_new(volume_block_count, volume_directory_block_count)
         else:
             self.__read_image_file()
 
@@ -395,12 +436,18 @@ class SOSDisk:
             self.data = reinterleave(self.data, interleave_tables[self.image_file_fmt], interleave_tables['po'])
         self.mark_used(0, 2)  # boot blocks
         self.volume_directory = SOSDirectory(self, 2, new = False)
-        bitmap_block_count = (self.volume_directory.header.total_blocks + 1) // (self.block_size * 8)
-        self.mark_used(self.volume_directory.header.bitmap_pointer, bitmap_block_count)
+        self.bitmap_block_count = (self.volume_directory.header.total_blocks + 1) // (self.block_size * 8)
+        self.bitmap_start_block = self.volume_directory.header.bitmap_pointer
+        self.mark_used(self.volume_directory.header.bitmap_pointer, self.bitmap_block_count)
 
-    def __create_new(size):
+    def __create_new(volume_block_count = 280, volume_directory_block_count = 4):
         self.data = bytearray(size * self.block_size)
-        self.volume_directory = SOSDirectory(self, 2, new = True)
+        self.mark_used(0, 2)  # boot blocks
+
+        self.bitmap_block_count = (volume_block_count + 1) // (self.block_size * 8)
+        self.bitmap_start_block = 2 + volume_directory_block_count
+        self.mark_used(self.bitmap_start_block, self.bitmap_block_count)  # allocation bitmap
+        self.volume_directory = SOSDirectory(self, 2, new = True, block_count = volume_directory_block_count)
 
 
     def close(self):
@@ -420,7 +467,10 @@ class SOSDisk:
         self.mark_used(first_block, count)
         offset = first_block * 512
         length = count * 512
-        return self.data[offset:offset+length]
+        return memoryview(self.data[offset:offset+length])
+
+    def alloc_block(self):
+        pass
 
     def print_directory(self,
                         recursive = False,
