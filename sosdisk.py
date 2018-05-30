@@ -59,62 +59,50 @@ class StorageType(IntEnum):
     volume_directory_header = 0x0f
     
 
-
-class FileType(Enum):
-    unknown                 = 0x00, 'UNK'
-    bad_blocks              = 0x01, 'BAD'
-    code                    = 0x02, 'PCD'  # SOS only
-    pascal_text             = 0x03, 'PTX'  # SOS only
-    text                    = 0x04, 'TXT'  # normal ASCII text file
-    pascal_data             = 0x05, 'PDA'  # SOS only
-    binary                  = 0x06, 'BIN'
-    font                    = 0x07, 'FNT'  # SOS only
-    screen_image            = 0x08, 'FOT'
-    business_basic_program  = 0x09, 'BA3'  # SOS only
-    business_basic_data     = 0x0a, 'DA3'  # SOS only
-    word_processor          = 0x0b, 'WPF'  # SOS only
-    sos_system              = 0x0c, 'SOS'  # SOS only
+class FileType(IntEnum):
+    unk = 0x00   # unknown/typeless
+    bad = 0x01   # bad blocks
+    pcd = 0x02   # (SOS) Pascal codefile (may be assembly)
+    ptx = 0x03   # (SOS) Pascal textfile
+    txt = 0x04   # normal ASCII text file
+    pda = 0x05   # (SOS) Pascal data
+    bin = 0x06   # binary, subtype has load address
+    fnt = 0x07   # (SOS) font
+    fot = 0x08   # screen image
+    ba3 = 0x09   # (SOS) Business BASIC program
+    da3 = 0x0a   # (SOS) Business BASIC data
+    wpf = 0x0b   # (SOS) word processor
+    sos = 0x0c   # (SOS) system file
     # 0x0d..0x0e reserved for SOS
-    subdirectory            = 0x0f, 'DIR'
-    rps_data                = 0x10, 'RPD'  # SOS only
-    rps_index               = 0x11, 'RPI'  # SOS only
-    applefile_discard       = 0x12, 'AFD'  # SOS only
-    applefile_model         = 0x13, 'AFM'  # SOS only
-    applefile_report_format = 0x14, 'AFR'  # SOS only
-    screen_library          = 0x15, 'SCL'  # SOS only
+    dir = 0x0f   # subdirectory
+    rpd = 0x10   # (SOS) RPS_data
+    rpi = 0x11   # (SOS) RPS index
+    afd = 0x12   # (SOS) AppleFile discard
+    afm = 0x13   # (SOS) AppleFile model
+    afr = 0x14   # (SOS) AppleFile report
+    scl = 0x15   # (SOS) screen library
     # 0x16..0x18 reserved for SOS
-    appleworks_data_base    = 0x19, 'ADB'
-    appleworks_word_proc    = 0x1a, 'AWP'
-    appleworks_spreadsheet  = 0x1b, 'ASP'
-    # 0xe0..0xff are ProDOS only
-    edasm_816_reolcatable   = 0xee, 'R16'
-    pascal_area             = 0xef, 'PAR'
-    prodos_ci_added_command = 0xf0, 'CMD'
-    # 0xf1..0xf8 are ProDOS user-defined file types 1-8
-    user_defined_1          = 0xf1, 'OVL'
-    user_defined_2          = 0xf2, 'UD2'
-    user_defined_3          = 0xf3, 'UD3'
-    user_defined_4          = 0xf4, 'UD4'
-    user_defined_5          = 0xf5, 'BAT'
-    user_defined_6          = 0xf6, 'UD6'
-    user_defined_7          = 0xf7, 'UD7'
-    user_defined_8          = 0xf8, 'PRG'
-    prodos_16_system        = 0xf9, 'P16'
-    integer_basic_program   = 0xfa, 'INT'
-    integer_basic_variables = 0xfb, 'IVR'
-    applesoft_program       = 0xfc, 'BAS'
-    applesoft_variables     = 0xfd, 'VAR'
-    relocatable_code        = 0xfe, 'REL'  # EDASM
-    prodos_system           = 0xff, 'SYS'
-
-    def __new__(cls, int_value, abbrev):
-        obj = object.__new__(cls)
-        obj._value_ = int_value
-        obj.abbrev = abbrev
-        return obj
-
-    def __int__(self):
-        return self.value
+    adb = 0x19   # AppleWorks database
+    awp = 0x1a   # AppleWorks word processor
+    asp = 0x1b   # AppleWorks spreadsheet
+    r16 = 0xee   # (ProDOS) EDASM 816 reolcatable
+    par = 0xef   # Apple Pascal area
+    cmd = 0xf0   # (ProDOS) added command
+    ovl = 0xf1   # (ProDOS) user defined 1, overlay
+    ud2 = 0xf2   # (ProDOS) user defined 2
+    ud3 = 0xf3   # (ProDOS) user defined 3
+    ud4 = 0xf4   # (ProDOS) user defined 4
+    bat = 0xf5   # (ProDOS) user defined 5, batch
+    ud6 = 0xf6   # (ProDOS) user defined 6
+    ud7 = 0xf7   # (ProDOS) user defined 7
+    prg = 0xf8   # (ProDOS) user defined 8
+    p16 = 0xf9   # (ProDOS 16) system
+    int = 0xfa   # (None) Integer BASIC program
+    ivr = 0xfb   # (None) Integer BASIC variables
+    bas = 0xfc   # (ProDOS) Applesoft BASIC program
+    var = 0xfd   # (ProDOS) Applesoft BASIC variables
+    rel = 0xfe   # (ProDOS) EDASM relocatable
+    sys = 0xff   # (ProDOS) system
 
 
 class FileAttributes(IntFlag):
@@ -269,11 +257,11 @@ class SOSFileEntry(SOSDirectoryEntry):
         self.name = bytes_to_sos_filename(name_length, name_b)
         self.creation = u32_to_sos_timestamp(creation_b)
         if self.storage_type == StorageType.subdirectory:
-            assert self.file_type == int(FileType.subdirectory)
+            assert self.file_type == FileType.dir
             self.subdir = SOSDirectory(disk, self.key_pointer)
         else:
             assert self.storage_type in set([StorageType.seedling, StorageType.sapling, StorageType.tree])
-            assert self.file_type != int(FileType.subdirectory)
+            assert self.file_type != FileType.dir
             self.storage = SOSStorage.create(self.disk, self.storage_type, self.key_pointer)
 
 
@@ -296,11 +284,10 @@ class SOSFileEntry(SOSDirectoryEntry):
                 else:
                     attrs += '.'
             try:
-                ft = FileType(self.file_type)
-                fts = ft.abbrev
+                ft = FileType(self.file_type).name
             except ValueError as e:
-                fts = '$%02x' % self.file_type
-            print('  %s  %s  %s  %6d' % (self.creation, fts, attrs, self.eof), end = '', file = file)
+                ft = '$%02x' % self.file_type
+            print('  %s  %s  %s  %6d' % (self.creation, ft, attrs, self.eof), end = '', file = file)
         print('  %s' % (prefix + self.name), file = file)
         if recursive and self.storage_type == StorageType.subdirectory:
             self.subdir.print(prefix + self.name + '/',
