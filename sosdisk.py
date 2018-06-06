@@ -1,5 +1,6 @@
 import datetime
 from enum import Enum, IntEnum, IntFlag
+import math
 import string
 import struct
 import sys
@@ -144,6 +145,52 @@ def u32_to_sos_timestamp(b):
     return datetime.datetime(year, month, day, hour, minute)
     
 
+class SOSAllocationBitmap:
+    def __init__(self, disk, start_block, bitmap_block_count, create = False, volume_block_count = None):
+        self.disk = disk
+        self.start_block = start_block
+        self.bitmap_block_count = bitmap_block_count
+        self.data = self.disk.get_blocks(self.start_block, self.bitmap_block_count)
+        if create:
+            self.__create_new(volume_block_count)
+
+    def __create_new(self, volume_block_count):
+        print('creating bitmap')
+        print(volume_block_count)
+        self.bitmap_block_count = math.ceil(volume_block_count / (8 * self.disk.block_size))
+        # mark all blocks as free
+        print(self.bitmap_block_count, self.disk.block_size)
+        self.data[:] = bytes(self.bitmap_block_count * self.disk.block_size)
+        print(len(self.data))
+        # mark blocks occupied by boot blocks, volume directory, and
+        # volume allocation bitmap as in use
+        self[0:self.start_block+self.bitmap_block_count] = [1] * (self.start_block+self.bitmap_block_count)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            result = [self.__getitem__(i) for i in range(*key.indices(len(self.data)))]
+        else:
+            # XXX is bit numbering little-endian or big-endian?
+            return bool((self.data[key >> 3] >> (key & 7)) & 1)
+
+
+    def __setitem__(self, key, value):
+        print('setitem(', key, ', ', value, ')')
+        if isinstance(key, slice):
+            print('slice')
+            print(key.indices(len(self.data)))
+            for k, v in zip(range(*key.indices(len(self.data))), value):
+                print(k, v)
+                self.__setitem__(k, v)
+                print(self.data)
+        else:
+            # XXX is bit numbering little-endian or big-endian?
+            if value:
+                self.data[key >> 3] |= (1 << (key & 7))
+            else:
+                self.data[key >> 3] &= ~ (1 << (key & 7))
+
+
 class SOSStorage:
     @classmethod
     def create(cls, disk, storage_type, key_pointer):
@@ -169,7 +216,6 @@ class SOSStorage:
 class SOSSeedling(SOSStorage):
     def __init__(self, disk, key_pointer):
         super().__init__(disk, key_pointer)
-        self.disk.mark_used(key_pointer)
         self.index[0] = key_pointer
         self.data_blocks += 1
 
@@ -182,7 +228,6 @@ class SOSSapling(SOSStorage):
             b = index_data[j] + (index_data[j + 256] << 8)
             if b != 0:
                 self.index[j] = b
-                self.disk.mark_used(b)
                 self.data_blocks += 1
                 self.last_block_index = j
 
@@ -200,7 +245,6 @@ class SOSTree(SOSStorage):
                     b = index_data[j] + (index_data[j + 256] << 8)
                     if b != 0:
                         self.index[j * 256 + i] = b
-                        self.disk.mark_used(b)
                         self.data_blocks += 1
                         self.last_block_index = j
 
@@ -415,49 +459,39 @@ class SOSDisk:
             sys.exit(2)            
         self.dirty = False
         self.block_count = len(self.data) // self.block_size
-        self.used = [False] * self.block_count
         if self.image_file_fmt != 'po':
             if len(self.data) != (35 * 8 * self.block_size):
                 print('Images other than 16-sector floppy must be in SOS/ProDOS sector order', file = sys.stderr)
                 sys.exit(2)
             self.data = reinterleave(self.data, interleave_tables[self.image_file_fmt], interleave_tables['po'])
-        self.mark_used(0, 2)  # boot blocks
         self.volume_directory = SOSDirectory(self, 2, new = False)
         self.bitmap_block_count = (self.volume_directory.header.total_blocks + 1) // (self.block_size * 8)
         self.bitmap_start_block = self.volume_directory.header.bitmap_pointer
-        self.mark_used(self.volume_directory.header.bitmap_pointer, self.bitmap_block_count)
+        self.allocation_bitmap = SOSAllocationBitmap(self, self.bitmap_start_block, self.bitmap_block_count)
 
-    def __create_new(volume_block_count = 280, volume_directory_block_count = 4):
-        self.data = bytearray(size * self.block_size)
-        self.mark_used(0, 2)  # boot blocks
-
+    def __create_new(self, volume_block_count = 280, volume_directory_block_count = 4):
+        print('create new')
+        self.dirty = True
+        self.block_count = volume_block_count;
+        self.data = bytearray(self.block_count * self.block_size)
         self.bitmap_block_count = (volume_block_count + 1) // (self.block_size * 8)
         self.bitmap_start_block = 2 + volume_directory_block_count
-        self.mark_used(self.bitmap_start_block, self.bitmap_block_count)  # allocation bitmap
+        self.allocation_bitmap = SOSAllocationBitmap(self, self.bitmap_start_block, self.bitmap_block_count, create = True, volume_block_count = self.block_count)
         self.volume_directory = SOSDirectory(self, 2, new = True, block_count = volume_directory_block_count)
 
 
     def close(self):
         if self.dirty:
+            print('dirty')
             self.image_file.seek(0)
             self.image_file.write(reinterleave(self.data, interleave_tables['po'], interleave_tables[self.image_file_fmt]))
         self.data = None
         self.image_file.close()
 
-    def mark_used(self, first_block, count = 1):
-        for block in range(first_block, first_block + count):
-            if self.used[block]:
-                print('block %d multiply used' % block)
-            self.used[block] = True
-
     def get_blocks(self, first_block, count = 1):
-        self.mark_used(first_block, count)
         offset = first_block * 512
         length = count * 512
         return memoryview(self.data[offset:offset+length])
-
-    def alloc_block(self):
-        pass
 
     def print_directory(self,
                         recursive = False,
@@ -507,3 +541,8 @@ class SOSDisk:
 # 35-36    2   bit map pointer        2  parent pointer   
 # 37-38    2   total blocks           1  parent_entry_num 2  header_pointer
 #                                     1  parent_entry_length = $27
+
+
+if __name__ == '__main__':
+    with open('foo.po', 'w') as f:
+        disk = SOSDisk(f, new = True)

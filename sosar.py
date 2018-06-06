@@ -71,15 +71,17 @@ else:
     print('must specify image file format', file = sys.stderr)
     sys.exit(2)
 
+file_mode = { 'mkfs': 'w',
+              'ls': 'r' } [args.cmd] + 'b'
+
+image = open(args.image, file_mode)
+
 if args.cmd == 'mkfs':
-    image = open(args.image, 'wb')
-    disk = SOSDisk(image, fmt, new = True, size = args.size)
+    disk = SOSDisk(image, fmt, new = True, volume_block_count = args.size)
 else:
-    image = open(args.image, 'rb')
     disk = SOSDisk(image, fmt)
 
 args.cmd_fn(args, disk)
 
-image.close()
-
+disk.close()
     
