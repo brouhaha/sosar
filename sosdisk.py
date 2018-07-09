@@ -54,7 +54,8 @@ class StorageType(IntEnum):
     seedling                = 0x01  # no indirect blocks
     sapling                 = 0x02  # one indirect block
     tree                    = 0x03  # two levels of indirect blocks
-    a2_pascal_area          = 0x04  # Apple II Pascal area
+    pascal_area             = 0x04  # Apple II Pascal area (ProDOS Technical Note #25)
+    extended_file           = 0x05  # file with data and resource forks (GS/OS) (ProDOS Technical Note #25)
     subdirectory            = 0x0d
     subdirectory_header     = 0x0e
     volume_directory_header = 0x0f
@@ -192,8 +193,8 @@ class SOSAllocationBitmap:
 
 
 class SOSStorage:
-    @classmethod
-    def create(cls, disk, storage_type, key_pointer):
+    @staticmethod
+    def create(disk, storage_type, key_pointer):
         if storage_type == StorageType.seedling:
             return SOSSeedling(disk, key_pointer)
         elif storage_type == StorageType.sapling:
@@ -251,6 +252,16 @@ class SOSTree(SOSStorage):
 class SOSDirectoryEntry:
     def __init__(self, disk):
         self.disk = disk
+
+    @staticmethod
+    def create_from_data(disk, entry_data, block_num, first_dir_entry):
+        if first_dir_entry:
+            if block_num == 2:
+                return SOSVolumeDirectoryHeader(disk, entry_data)
+            else:
+                return SOSSubdirectoryHeader(disk, entry_data)
+        else:
+            return SOSFileEntry(disk, entry_data)
 
     def print(self,
               prefix,
@@ -364,14 +375,9 @@ class SOSDirectoryBlock:
         #print('prev: %d, next: %d' % (self.prev_block, self.next_block))
         for i in range(self.entry_count):
             offset = 4 + self.directory.entry_length * i
-            entry_data = memoryview(data[offset: offset+self.directory.entry_length])
-            if first_dir_block and i == 0:
-                if block_num == 2:
-                    self.entries.append(SOSVolumeDirectoryHeader(self.disk, entry_data))
-                else:
-                    self.entries.append(SOSSubdirectoryHeader(self.disk, entry_data))
-            else:
-                self.entries.append(SOSFileEntry(self.disk, entry_data))
+            # data is already a memoryview, so slicing it doesn't copy it
+            entry_data = data[offset: offset+self.directory.entry_length]
+            self.entries.append(SOSDirectoryEntry.create_from_data(self.disk, entry_data, block_num, first_dir_block and (i == 0)))
 
     def __create_new(self, block_num, first_dir_block = False):
         self.prev_block = prev_block,
@@ -429,13 +435,6 @@ class SOSDirectory:
                             recursive = recursive,
                             long = long,
                             file = file)
-        # if recursive:
-        #     for db in self.directory_blocks:
-        #         for entry in db.entries:
-        #             if hasattr(entry, 'subdir'):
-        #                 entry.subdir.print('',
-        #                                    recursive = recursive,
-        #                                    file = file)
 
 
 class SOSDisk:
@@ -491,7 +490,7 @@ class SOSDisk:
     def get_blocks(self, first_block, count = 1):
         offset = first_block * 512
         length = count * 512
-        return memoryview(self.data[offset:offset+length])
+        return memoryview(self.data)[offset:offset+length]
 
     def print_directory(self,
                         recursive = False,
