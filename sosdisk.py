@@ -124,7 +124,7 @@ sos_valid_fn_chars = set(string.ascii_uppercase + string.digits + '.')
 def bytes_to_sos_filename(l, b):
     assert len(b) == 15
     assert 1 <= l <= 15
-    s = str(b, 'ascii')
+    s = str(b[:l], 'ascii')
     assert all(c in sos_valid_fn_chars for c in s[:l])
     assert all(c == 0 for c in b[l:])
     return s.lower()
@@ -213,6 +213,21 @@ class SOSStorage:
     def is_sparse(self):
         return self.data_blocks != (self.last_block_index + 1)
 
+    def read(self,
+             offset = 0,
+             length = 0):
+        data = bytearray(length)
+        while length > 0:
+            block_index = offset // self.disk.block_size
+            block_offset = offset % self.disk.block_size
+            chunk_length = min(length, self.disk.block_size - block_offset)
+            if block_index in self.index:
+                block_number = self.index[block_index]
+                data[offset:offset+chunk_length] = self.disk.get_blocks(block_number)[block_offset:block_offset+chunk_length]
+            offset += chunk_length
+            length -= chunk_length
+        return data
+
 
 class SOSSeedling(SOSStorage):
     def __init__(self, disk, key_pointer):
@@ -271,7 +286,12 @@ class SOSDirectoryEntry:
         pass
 
 
-class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
+class SOSDirectoryHeader(SOSDirectoryEntry):
+    def __init__(self, disk):
+        super().__init__(disk)
+
+
+class SOSVolumeDirectoryHeader(SOSDirectoryHeader):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
         (storage_nl, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
@@ -286,7 +306,7 @@ class SOSVolumeDirectoryHeader(SOSDirectoryEntry):
         assert self.total_blocks == disk.block_count
         self.creation = u32_to_sos_timestamp(creation_b)
 
-class SOSSubdirectoryHeader(SOSDirectoryEntry):
+class SOSSubdirectoryHeader(SOSDirectoryHeader):
     def __init__(self, disk, entry_data):
         super().__init__(disk)
         (storage_nl, name_b, self.reserved, creation_b, self.version, self.min_version, self.access, self.entry_length, self.entries_per_block, self.file_count, self.bitmap_pointer, self.total_blocks) = struct.unpack('<B15s8sLBBBBBHHH', entry_data)
@@ -318,6 +338,20 @@ class SOSFileEntry(SOSDirectoryEntry):
             assert self.storage_type in set([StorageType.seedling, StorageType.sapling, StorageType.tree])
             assert self.file_type != FileType.dir
             self.storage = SOSStorage.create(self.disk, self.storage_type, self.key_pointer)
+
+
+    def get_name(self):
+        return self.name
+
+
+    def get_eof(self):
+        return self.eof
+
+
+    def read(self,
+             offset = 0,
+             length = None):
+        return self.storage.read(offset, length)
 
 
     def print(self,
@@ -424,6 +458,13 @@ class SOSDirectory:
             else:
                 block_num = first_block + i
             
+    def files(self,
+              path,
+              recursive = False):
+        for db in self.directory_blocks:
+            for entry in db.entries:
+                if isinstance(entry, SOSFileEntry) and (entry.storage_type != StorageType.unused_entry) and hasattr(entry, 'storage'):
+                    yield entry
 
     def print(self, prefix,
               recursive = False,
@@ -491,6 +532,11 @@ class SOSDisk:
         offset = first_block * 512
         length = count * 512
         return memoryview(self.data)[offset:offset+length]
+
+    def files(self,
+              path,
+              recursive = True):
+        return self.volume_directory.files(path, recursive)
 
     def print_directory(self,
                         recursive = False,
