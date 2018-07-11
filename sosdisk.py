@@ -213,7 +213,7 @@ class SOSStorage:
     def is_sparse(self):
         return self.data_blocks != (self.last_block_index + 1)
 
-    def read(self,
+    def get_bytes(self,
              offset = 0,
              length = 0):
         data = bytearray(length)
@@ -227,6 +227,20 @@ class SOSStorage:
             offset += chunk_length
             length -= chunk_length
         return data
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            indices = key.indices((self.last_block_index+1) * 512)
+            length = len(range(*indices))
+            if indices[2] == 1:
+                return self.get_bytes(indices[0], length)
+            else:
+                data = bytearray(length)
+                for i in range(*indices):
+                    data[i] = self.get_bytes(i, 1)
+            return data
+        else:
+            return self.get_bytes(key, 1);
 
 
 class SOSSeedling(SOSStorage):
@@ -328,6 +342,7 @@ class SOSFileEntry(SOSDirectoryEntry):
         self.storage_type = StorageType(storage_nl >> 4)
         if self.storage_type == StorageType.unused_entry:
             return
+        self.pos = 0
         self.eof = eof [2] << 16 | eof [1] << 8 | eof[0]
         self.name = bytes_to_sos_filename(name_length, name_b)
         self.creation = u32_to_sos_timestamp(creation_b)
@@ -344,14 +359,30 @@ class SOSFileEntry(SOSDirectoryEntry):
         return self.name
 
 
-    def get_eof(self):
+    def __len__(self):
         return self.eof
 
 
-    def read(self,
-             offset = 0,
-             length = None):
-        return self.storage.read(offset, length)
+    def __getitem__(self, key):
+        return self.storage.__getitem__(key)
+
+
+    def seek(self, offset, from_what = 0):
+        if from_what == 0:
+            self.pos = offset
+        elif from_what == 1:
+            self.pos += offset
+        elif from_what == 2:
+            self.pos = self.eof + offset
+        else:
+            assert False
+
+    def read(self, length = None):
+        if length is None:
+            length = self.eof - self.pos
+        data = self.storage[self.pos:self.pos+length]
+        self.pos += len(data)
+        return data
 
 
     def print(self,

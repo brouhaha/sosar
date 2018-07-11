@@ -19,8 +19,8 @@ def cmd_extract(args, disk):
         name = sf.get_name()
         #print(name)
         #print(len(name))
-        eof = sf.get_eof()
-        data = sf.read(0, eof)
+        length = len(sf)
+        data = sf.read(length)
         #print(len(data))
         with open(name, 'wb') as f:
             f.write(data)
