@@ -279,6 +279,8 @@ class SOSTree(SOSStorage):
                         self.last_block_index = j
 
 class SOSDirectoryEntry:
+    entry_size = 39
+
     def __init__(self, disk):
         self.disk = disk
 
@@ -344,8 +346,8 @@ class SOSFileEntry(SOSDirectoryEntry):
             return
         self.pos = 0
         self.eof = eof [2] << 16 | eof [1] << 8 | eof[0]
-        self.name = bytes_to_sos_filename(name_length, name_b)
-        self.creation = u32_to_sos_timestamp(creation_b)
+        self._name = bytes_to_sos_filename(name_length, name_b)
+        self._creation = u32_to_sos_timestamp(creation_b)
         if self.storage_type == StorageType.subdirectory:
             assert self.file_type == FileType.dir
             self.subdir = SOSDirectory(disk, self.key_pointer)
@@ -354,18 +356,19 @@ class SOSFileEntry(SOSDirectoryEntry):
             assert self.file_type != FileType.dir
             self.storage = SOSStorage.create(self.disk, self.storage_type, self.key_pointer)
 
+    @property
+    def name(self):
+        return self._name
 
-    def get_name(self):
-        return self.name
-
+    @property
+    def creation_timestamp(self):
+        return self._creation
 
     def __len__(self):
         return self.eof
 
-
     def __getitem__(self, key):
         return self.storage.__getitem__(key)
-
 
     def seek(self, offset, from_what = 0):
         if from_what == 0:
@@ -407,7 +410,7 @@ class SOSFileEntry(SOSDirectoryEntry):
                 ft = FileType(self.file_type).name
             except ValueError as e:
                 ft = '$%02x' % self.file_type
-            print('  %s  %s  %s  %6d' % (self.creation, ft, attrs, self.eof), end = '', file = file)
+            print('  %s  %s  %s  %6d' % (self.creation_timestamp, ft, attrs, self.eof), end = '', file = file)
         print('  %s' % (prefix + self.name), file = file)
         if recursive and self.storage_type == StorageType.subdirectory:
             self.subdir.print(prefix + self.name + '/',
@@ -417,6 +420,8 @@ class SOSFileEntry(SOSDirectoryEntry):
         
 
 class SOSDirectoryBlock:
+    first_entry_offset = 4
+
     def __init__(self,
                  disk,
                  directory,               # the directory containing this block
@@ -424,30 +429,49 @@ class SOSDirectoryBlock:
                  first_dir_block = False,
                  new = False,
                  directory_name = None,   # if new
-                 prev_block = None):      # if new
+                 prev_block_num = None):      # if new
         self.disk = disk
         self.directory = directory
         self.entries = []
-        self.entry_count = (self.disk.block_size - 4) // self.directory.entry_length
         if new:
             self.__create_new(block_num, first_dir_block)
         else:
             self.__read_from_image(block_num, first_dir_block)
 
+    @property
+    def prev_block(self):
+        return struct.unpack('<H', self.data[0:2])[0]
+
+    @prev_block.setter
+    def prev_block(self, p):
+        self.data[0:2] = struct.pack('<H', p)
+
+    @property
+    def next_block(self):
+        return struct.unpack('<H', self.data[2:4])[0]
+
+    @next_block.setter
+    def next_block(self, n):
+        self.data[2:4] = struct.pack('<H', n)
+
+    def __getitem__(self, key):
+        return self.entries[key]
+
     def __read_from_image(self, block_num, first_dir_block = False):
-        data = self.disk.get_blocks(block_num)
-        self.prev_block, self.next_block = struct.unpack('<HH', data[0:4])
+        self.data = self.disk.get_blocks(block_num)
+
         #print('prev: %d, next: %d' % (self.prev_block, self.next_block))
-        for i in range(self.entry_count):
-            offset = 4 + self.directory.entry_length * i
+        for i in range(self.directory.entries_per_block):
+            offset = self.first_entry_offset + i * SOSDirectoryEntry.entry_size
             # data is already a memoryview, so slicing it doesn't copy it
-            entry_data = data[offset: offset+self.directory.entry_length]
+            entry_data = self.data[offset: offset + SOSDirectoryEntry.entry_size]
             self.entries.append(SOSDirectoryEntry.create_from_data(self.disk, entry_data, block_num, first_dir_block and (i == 0)))
 
     def __create_new(self, block_num, first_dir_block = False):
-        self.prev_block = prev_block,
+        self.data = self.disk.get_blocks(block_num)
+
+        self.prev_block = 0
         self.next_block = 0  # will be updated later if needed
-        data = struct.pack('<HH', self.prev_block, self.next_block) + bytearray(disk.block_size - 4)
         if block_num == 2:
             self.entries.append(SOSVolumeDirectoryHeader(disk, new = True, directory_name = directory_name))
         else:
@@ -463,7 +487,7 @@ class SOSDirectory:
                  directory_name = None):  # if new
         self.disk = disk
         self.growable = first_block != 2
-        self.entry_length = 39
+        self.entries_per_block = (self.disk.block_size - SOSDirectoryBlock.first_entry_offset) // SOSDirectoryEntry.entry_size
         if new:
             self.__create_new(first_block, block_count)
         else:
@@ -483,12 +507,26 @@ class SOSDirectory:
 
     def __create_new(self, first_block = None, block_count = 1):
         prev_block_num = 0
+        self.directory_blocks = []
         for i in range(block_count):
             if first_block is None:
                 block_num = disk.alloc_block()
             else:
                 block_num = first_block + i
+            self.directory_blocks.append(SOSDirectoryBlock(self.disk,
+                                                           self,
+                                                           block_num,
+                                                           first_dir_block = (i == 0),
+                                                           new = True,
+                                                           direcotry_name = directory_name,
+                                                           prev_block_num = prev_block_num))
+            prev_block_num = block_num
             
+    def __getitem__(self, key):
+        rel_dir_block = key // self.entries_per_block
+        entry_within_block = key % self.entries_per_block
+        return self.directory_blocks[rel_dir_block][entry_within_block]
+
     def files(self,
               path,
               recursive = False):
